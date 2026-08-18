@@ -19,6 +19,7 @@ from olympia.amo.tests import (
     grant_permission,
     user_factory,
 )
+from olympia.constants.abuse import POLICY_EXPOSURE
 from olympia.ratings.models import Rating
 from olympia.reviewers.models import AutoApprovalSummary
 from olympia.versions.models import VersionPreview
@@ -34,7 +35,9 @@ class TestAbuseReportAdmin(TestCase):
         cls.addon2 = addon_factory(guid='@guid2', name='Owt')
         cls.addon3 = addon_factory(guid='@guid3', name='Eerht')
         cls.user = user_factory(email='someone@mozilla.com')
-        grant_permission(cls.user, 'AbuseReports:Edit', 'Abuse Report Triage')
+        grant_permission(
+            cls.user, amo.permissions.ABUSEREPORTS_EDIT, name='Abuse Report Triage'
+        )
         # Create a few abuse reports.
         cls.report1 = AbuseReport.objects.create(
             addon_name='The One',
@@ -580,10 +583,10 @@ class TestCinderPolicyAdmin(TestCase):
         self.list_url = reverse('admin:abuse_cinderpolicy_changelist')
         self.sync_cinder_policies_url = reverse('admin:abuse_sync_cinder_policies')
 
-    def login(self, permission='*:*'):
+    def login(self, permission=amo.permissions.SUPERPOWERS):
         self.user = user_factory(email='someone@mozilla.com')
         if permission:
-            grant_permission(self.user, permission, 'Group')
+            grant_permission(self.user, permission, name='Group')
         self.client.force_login(self.user)
 
     def _make_list_request(self, *, read_only=False):
@@ -626,11 +629,9 @@ class TestCinderPolicyAdmin(TestCase):
             'id': 'abuse_sync_cinder_policies',
             'value': 'Sync from Cinder',
         }
-        assert len(
-            doc(
-                'input[id^="id_form-"][id$="-expose_in_reviewer_tools"][type="checkbox"]'
-            )
-        ) == (CinderPolicy.objects.count() if not read_only else 0)
+        assert len(doc('select[id^="id_form-"][id$="-expose_in_reviewer_tools"]')) == (
+            CinderPolicy.objects.count() if not read_only else 0
+        )
 
     def test_list_no_permission(self):
         self.login(permission=None)
@@ -642,16 +643,61 @@ class TestCinderPolicyAdmin(TestCase):
         self._make_list_request()
 
     def test_list_with_view_permission(self):
-        self.login(permission='CinderPolicies:View')
+        self.login(permission=amo.permissions.CINDER_POLICIES_VIEW)
         self._make_list_request(read_only=True)
+
+    def test_list_with_filter(self):
+        self.login()
+        CinderPolicy.objects.create(
+            name='Published Policy',
+            uuid=uuid.uuid4(),
+            status_in_cinder=CinderPolicy.POLICY_STATUSES.PUBLISHED,
+            expose_in_reviewer_tools=POLICY_EXPOSURE.BOTH,
+        )
+        CinderPolicy.objects.create(
+            name='Archived Policy',
+            uuid=uuid.uuid4(),
+            status_in_cinder=CinderPolicy.POLICY_STATUSES.ARCHIVED,
+            expose_in_reviewer_tools=POLICY_EXPOSURE.NONE,
+        )
+        CinderPolicy.objects.create(
+            name='Draft Policy',
+            uuid=uuid.uuid4(),
+            status_in_cinder=CinderPolicy.POLICY_STATUSES.DRAFT,
+            expose_in_reviewer_tools=POLICY_EXPOSURE.EXTENSION,
+        )
+
+        # Filter by status_in_cinder=PUBLISHED
+        response = self.client.get(
+            self.list_url,
+            {'status_in_cinder__exact': CinderPolicy.POLICY_STATUSES.PUBLISHED},
+        )
+        assert response.status_code == 200
+        doc = pq(response.content)
+        assert len(doc('#result_list tbody tr')) == 1
+        assert 'Published Policy' in doc('#result_list').text()
+        assert 'Archived Policy' not in doc('#result_list').text()
+        assert 'Draft Policy' not in doc('#result_list').text()
+
+        # Filter by expose_in_reviewer_tools=EXTENSION
+        response = self.client.get(
+            self.list_url,
+            {'expose_in_reviewer_tools__exact': POLICY_EXPOSURE.EXTENSION},
+        )
+        assert response.status_code == 200
+        doc = pq(response.content)
+        assert len(doc('#result_list tbody tr')) == 1
+        assert 'Draft Policy' in doc('#result_list').text()
+        assert 'Published Policy' not in doc('#result_list').text()
+        assert 'Archived Policy' not in doc('#result_list').text()
 
     def _make_edit_request(self, expected_status_code):
         policy = CinderPolicy.objects.create(
-            name='Bar', uuid=uuid.uuid4(), expose_in_reviewer_tools=False
+            name='Bar', uuid=uuid.uuid4(), expose_in_reviewer_tools=POLICY_EXPOSURE.NONE
         )
         detail_url = reverse('admin:abuse_cinderpolicy_change', args=(policy.id,))
         response = self.client.post(
-            detail_url, {'expose_in_reviewer_tools': True}, follow=True
+            detail_url, {'expose_in_reviewer_tools': POLICY_EXPOSURE.BOTH}, follow=True
         )
         assert response.status_code == expected_status_code
         return policy
@@ -659,17 +705,17 @@ class TestCinderPolicyAdmin(TestCase):
     def test_edit_policies(self):
         self.login()
         policy = self._make_edit_request(200)
-        assert policy.reload().expose_in_reviewer_tools is True
+        assert policy.reload().expose_in_reviewer_tools == POLICY_EXPOSURE.BOTH
 
     def test_edit_policies_cannot_with_no_permission(self):
         self.login(permission=None)
         policy = self._make_edit_request(403)
-        assert policy.reload().expose_in_reviewer_tools is False
+        assert policy.reload().expose_in_reviewer_tools == POLICY_EXPOSURE.NONE
 
     def test_edit_policies_cannot_with_view_permission(self):
-        self.login(permission='CinderPolicies:View')
+        self.login(permission=amo.permissions.CINDER_POLICIES_VIEW)
         policy = self._make_edit_request(403)
-        assert policy.reload().expose_in_reviewer_tools is False
+        assert policy.reload().expose_in_reviewer_tools == POLICY_EXPOSURE.NONE
 
     def test_sync_policies_no_permission(self):
         self.login(permission=None)
@@ -694,5 +740,5 @@ class TestCinderPolicyAdmin(TestCase):
         self._make_sync_policies_request()
 
     def test_sync_policies_with_view_permission(self):
-        self.login(permission='CinderPolicies:View')
+        self.login(permission=amo.permissions.CINDER_POLICIES_VIEW)
         self._make_sync_policies_request()

@@ -23,7 +23,11 @@ from rest_framework.viewsets import GenericViewSet
 
 import olympia.core.logger
 from olympia import amo
-from olympia.abuse.models import AbuseReport, CinderPolicy, ContentDecision
+from olympia.abuse.models import (
+    AbuseReport,
+    CinderPolicy,
+    ContentDecision,
+)
 from olympia.abuse.tasks import report_decision_to_cinder_and_notify
 from olympia.access import acl
 from olympia.activity.models import ActivityLog, CommentLog
@@ -52,6 +56,7 @@ from olympia.api.permissions import (
 from olympia.constants.abuse import DECISION_ACTIONS
 from olympia.constants.reviewers import (
     HELD_DECISION_CHOICES,
+    MAX_PAST_DECISIONS_SHOWN_INLINE,
     MAX_VERSIONS_SHOWN_INLINE,
     REVIEWS_PER_PAGE,
     REVIEWS_PER_PAGE_MAX,
@@ -69,6 +74,7 @@ from olympia.stats.utils import (
 from olympia.users.models import UserProfile
 from olympia.versions.models import Version
 from olympia.zadmin.models import get_config, set_config
+from src.olympia.abuse.actions import CONTENT_ACTION_FROM_DECISION_ACTION
 
 from .decorators import (
     any_reviewer_or_moderator_required,
@@ -447,8 +453,10 @@ def review(request, addon, channel=None):
 
     # Are we looking at an unlisted review page, or (weirdly) the listed
     # review page of an unlisted-only add-on?
-    unlisted_only = channel == amo.CHANNEL_UNLISTED or not addon.has_listed_versions(
-        include_deleted=True
+    unlisted_only = (
+        channel in (amo.CHANNEL_UNLISTED, amo.CHANNEL_ENTERPRISE)
+        or channel == amo.CHANNEL_LISTED
+        and not addon.has_listed_versions(include_deleted=True)
     )
     if unlisted_only and not acl.is_unlisted_addons_viewer_or_reviewer(request.user):
         raise PermissionDenied
@@ -581,12 +589,6 @@ def review(request, addon, channel=None):
         .order_by('-created')
         .first()
     )
-    # The actions we shouldn't show a minimal form for.
-    # FIXME: the full/minimal distinction is obsolete - we don't use the extra fields
-    actions_full = []
-    for key, action in actions:
-        if not (is_static_theme or action.get('minimal')):
-            actions_full.append(key)
 
     addons_sharing_same_guid = (
         Addon.unfiltered.all()
@@ -694,7 +696,6 @@ def review(request, addon, channel=None):
             and request.user.is_staff
         ),
         actions=actions,
-        actions_full=actions_full,
         addon=addon,
         addons_sharing_same_guid=addons_sharing_same_guid,
         approvals_info=approvals_info,
@@ -710,7 +711,16 @@ def review(request, addon, channel=None):
             else AddonApprovalsCounter().get_content_review_status_display()
         ),
         count=count,
-        DECISION_ACTIONS=DECISION_ACTIONS,
+        decision_actions=[
+            (
+                'primary-enf'
+                if action not in DECISION_ACTIONS.FOLLOWUP_CINDER_ACTIONS
+                else 'followup-enf',
+                action.value,
+                CONTENT_ACTION_FROM_DECISION_ACTION[action].description,
+            )
+            for action in DECISION_ACTIONS
+        ],
         flags=flags,
         form=form,
         format_matched_rules=formatted_matched_rules_with_files_and_data,
@@ -732,6 +742,7 @@ def review(request, addon, channel=None):
             and not version.pending_rejection
         ),
         promoted_groups=promoted_groups,
+        MAX_PAST_DECISIONS_SHOWN_INLINE=MAX_PAST_DECISIONS_SHOWN_INLINE,
         name_translations=name_translations,
         now=datetime.now(),
         num_pages=num_pages,
@@ -744,7 +755,6 @@ def review(request, addon, channel=None):
         subscribed_unlisted=ReviewerSubscription.objects.filter(
             user=request.user, addon=addon, channel=amo.CHANNEL_UNLISTED
         ).exists(),
-        unlisted=(channel == amo.CHANNEL_UNLISTED),
         user_ratings=user_ratings,
         version=version,
         VERSION_ADU_LIMIT=VERSION_ADU_LIMIT,
@@ -902,8 +912,10 @@ def whiteboard(request, addon, channel):
     channel_as_text = channel
     channel, content_review = determine_channel(channel)
 
-    unlisted_only = channel == amo.CHANNEL_UNLISTED or not addon.has_listed_versions(
-        include_deleted=True
+    unlisted_only = (
+        channel == amo.CHANNEL_UNLISTED
+        or channel == amo.CHANNEL_LISTED
+        and not addon.has_listed_versions(include_deleted=True)
     )
     if unlisted_only and not acl.is_unlisted_addons_viewer_or_reviewer(request.user):
         raise PermissionDenied

@@ -12,6 +12,7 @@ from django.urls import reverse
 
 import pytest
 import responses
+import time_machine
 from waffle.testutils import override_switch
 
 from olympia import amo
@@ -34,7 +35,6 @@ from olympia.constants.abuse import (
     ILLEGAL_SUBCATEGORIES,
 )
 from olympia.constants.permissions import ADDONS_HIGH_IMPACT_APPROVE
-from olympia.constants.promoted import PROMOTED_GROUP_CHOICES
 from olympia.core import set_user
 from olympia.files.models import File
 from olympia.ratings.models import Rating
@@ -49,7 +49,6 @@ from ..actions import (
     ContentActionDeleteCollection,
     ContentActionDeleteRating,
     ContentActionDisableAddon,
-    ContentActionOverrideApprove,
     ContentActionTargetAppealApprove,
     ContentActionTargetAppealRemovalAffirmation,
 )
@@ -1093,7 +1092,7 @@ class TestCinderJob(TestCase):
         assert CinderJob.objects.count() == 1
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == ['some@email.com']
-        assert 'already assessed' in mail.outbox[0].body
+        assert 'already been handled' in mail.outbox[0].body
         assert ContentDecision.objects.exists()
         decision = ContentDecision.objects.get()
         assert decision.action == DECISION_ACTIONS.AMO_CLOSED_NO_ACTION
@@ -1593,7 +1592,7 @@ class TestCinderJob(TestCase):
         assert not NeedsHumanReview.objects.exists()
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == ['some@email.com']
-        assert 'already assessed' in mail.outbox[0].body
+        assert 'already been handled' in mail.outbox[0].body
         assert ContentDecision.objects.exists()
         decision = ContentDecision.objects.get()
         assert decision.action == DECISION_ACTIONS.AMO_CLOSED_NO_ACTION
@@ -2526,16 +2525,21 @@ class TestContentDecision(TestCase):
             action_existing_to_class[(action, None, action)] = (
                 ContentActionTargetAppealRemovalAffirmation
             )
-            # add override from takedown to approve cases
+            # Override of a takedown: the helper always matches the *new*
+            # action (the previous action is reversed separately, in
+            # reverse_overridden_action), so it's the same class as the base
+            # case for that action.
             action_existing_to_class[(DECISION_ACTIONS.AMO_APPROVE, action, None)] = (
-                ContentActionOverrideApprove
+                CONTENT_ACTION_FROM_DECISION_ACTION[DECISION_ACTIONS.AMO_APPROVE]
             )
             action_existing_to_class[
                 (DECISION_ACTIONS.AMO_APPROVE_VERSION, action, None)
-            ] = ContentActionOverrideApprove
+            ] = CONTENT_ACTION_FROM_DECISION_ACTION[
+                DECISION_ACTIONS.AMO_APPROVE_VERSION
+            ]
             # and override from takedown to ignore
             action_existing_to_class[(DECISION_ACTIONS.AMO_IGNORE, action, None)] = (
-                ContentActionOverrideApprove
+                CONTENT_ACTION_FROM_DECISION_ACTION[DECISION_ACTIONS.AMO_IGNORE]
             )
 
         for (
@@ -2612,43 +2616,49 @@ class TestContentDecision(TestCase):
             override_of=second_decision,
         )
 
-        action_existing_to_class = {}
         action_date = datetime.now()
-        for action in DECISION_ACTIONS.REMOVING.values:
-            for approve_action in (
+        for overridden_action in DECISION_ACTIONS.REMOVING.values:
+            for new_action in (
                 DECISION_ACTIONS.AMO_APPROVE,
                 DECISION_ACTIONS.AMO_APPROVE_VERSION,
                 DECISION_ACTIONS.AMO_IGNORE,
             ):
-                action_existing_to_class[
-                    (approve_action, action, action_date, None)
-                ] = ContentActionOverrideApprove
-
-                # But if there is no action_date the override is ignored
-                action_existing_to_class[(approve_action, action, None, None)] = (
-                    CONTENT_ACTION_FROM_DECISION_ACTION[approve_action]
+                current_decision.update(action=new_action)
+                # The most recent carried-out decision in the override chain is
+                # the one being overridden (and reversed).
+                second_decision.update(
+                    action=overridden_action, action_date=action_date
                 )
+                first_decision.update(action=overridden_action, action_date=None)
+                helper = current_decision.get_action_helper()
+                # The helper always matches the *new* action; the overridden
+                # action is reversed separately in reverse_overridden_action.
+                assert (
+                    helper.__class__ == CONTENT_ACTION_FROM_DECISION_ACTION[new_action]
+                )
+                assert current_decision.get_overridden_decision() == second_decision
 
-                # Previous decisions are also considered though
-                action_existing_to_class[
-                    (approve_action, action, None, action_date)
-                ] = ContentActionOverrideApprove
+                # If the most recent decision wasn't carried out, we walk further
+                # up the chain to find the one that was.
+                second_decision.update(action_date=None)
+                first_decision.update(action_date=action_date)
+                assert current_decision.get_overridden_decision() == first_decision
 
-        for (
-            new_action,
-            overridden_action,
-            second_decision_date,
-            first_decision_date,
-        ), ActionClass in action_existing_to_class.items():
-            current_decision.update(action=new_action)
-            second_decision.update(
-                action=overridden_action, action_date=second_decision_date
-            )
-            first_decision.update(
-                action=overridden_action, action_date=first_decision_date
-            )
+                # And if nothing in the chain was carried out, nothing is
+                # considered overridden.
+                first_decision.update(action_date=None)
+                assert current_decision.get_overridden_decision() is None
 
-            assert current_decision.get_action_helper().__class__ == ActionClass
+        # Overriding a takedown with the same takedown re-affirms it: the helper
+        # still matches the action, but the reporter isn't notified again.
+        second_decision.update(
+            action=DECISION_ACTIONS.AMO_DISABLE_ADDON, action_date=action_date
+        )
+        current_decision.update(action=DECISION_ACTIONS.AMO_DISABLE_ADDON)
+        helper = current_decision.get_action_helper()
+        assert helper.__class__ == ContentActionDisableAddon
+        assert helper.reporter_template_path is None
+        assert helper.reporter_appeal_template_path is None
 
     def _test_appeal_as_target(self, *, resolvable_in_reviewer_tools, expected_queue):
         addon = addon_factory(
@@ -3366,7 +3376,7 @@ class TestContentDecision(TestCase):
         assert 'appeal' in mail.outbox[0].body
 
     def test_execute_action_ban_user_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         user = user_factory(email='superstarops@mozilla.com')
         decision = ContentDecision.objects.create(
             user=user,
@@ -3411,10 +3421,10 @@ class TestContentDecision(TestCase):
         assert 'appeal' in mail.outbox[0].body
 
     def test_execute_action_disable_addon_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         addon = addon_factory(users=[user_factory()])
         self.make_addon_promoted(
-            addon, PROMOTED_GROUP_CHOICES.RECOMMENDED, approve_version=True
+            addon, api_name='high_profile', high_profile=True, approve_version=True
         )
         decision = ContentDecision.objects.create(
             addon=addon,
@@ -3442,8 +3452,8 @@ class TestContentDecision(TestCase):
 
         decision.execute_action(release_hold=True)
         self._test_execute_action_disable_addon_outcome(decision)
-        assert 'An attachment was provided.' in mail.outbox[0].body
-        assert 'To respond or view the file,' in mail.outbox[0].body
+        assert 'A reviewer has attached a file' in mail.outbox[0].body
+        assert 'reply by visiting' in mail.outbox[0].body
 
     def test_execute_action_disable_addon(self):
         addon = addon_factory(users=[user_factory()])
@@ -3456,8 +3466,8 @@ class TestContentDecision(TestCase):
         decision.execute_action()
         self._test_execute_action_disable_addon_outcome(decision)
         assert '14 day(s)' not in mail.outbox[0].body
-        assert 'An attachment was provided.' not in mail.outbox[0].body
-        assert 'To respond or view the file,' not in mail.outbox[0].body
+        assert 'A reviewer has attached a file' not in mail.outbox[0].body
+        assert 'reply by visiting' not in mail.outbox[0].body
 
     def test_execute_action_disable_addon_from_cinder_without_private_notes(self):
         addon = addon_factory(users=[user_factory()])
@@ -3507,7 +3517,7 @@ class TestContentDecision(TestCase):
         assert 'Parent, specifically Bad policy: This is bad' in mail.outbox[0].body
         assert 'some private notes' not in mail.outbox[0].body
 
-    def test_execute_action_disable_addon_with_additional_delayed_block_action(self):
+    def test_execute_action_disable_addon_with_followup_delayed_block_action(self):
         addon = addon_factory(users=[user_factory()])
         decision = ContentDecision.objects.create(
             addon=addon,
@@ -3525,10 +3535,29 @@ class TestContentDecision(TestCase):
         self._test_execute_action_disable_addon_outcome(decision)
         assert followup.reload().action_date is not None
         assert BlocklistSubmission.objects.exists()
+        submission = BlocklistSubmission.objects.get()
         self.assertCloseToNow(
-            BlocklistSubmission.objects.get().delayed_until,
-            now=datetime.now() + timedelta(days=7),
+            submission.delayed_until, now=datetime.now() + timedelta(days=7)
         )
+        assert submission.from_followup == followup
+
+    def test_execute_action_disable_addon_already_disabled(self):
+        addon = addon_factory(users=[user_factory()], status=amo.STATUS_DISABLED)
+        decision = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_DISABLE_ADDON,
+            reviewer_user=self.reviewer_user,
+        )
+        assert decision.action_date is None
+        assert decision.execute_action() is None
+        self.assertCloseToNow(decision.action_date)
+        assert decision.addon.reload().status == amo.STATUS_DISABLED
+        alog = ActivityLog.objects.filter(action=amo.LOG.DECISION_CREATED.id).get()
+        assert alog.contentdecisionlog_set.get().decision == decision
+        assert alog.versionlog_set.get().version == addon.versions.get()
+        decision.send_notifications()
+        assert len(mail.outbox) == 1
+        assert 'appeal' in mail.outbox[0].body
 
     def _test_execute_action_reject_version_outcome(self, decision):
         decision.send_notifications()
@@ -3541,11 +3570,11 @@ class TestContentDecision(TestCase):
         assert VersionReviewerFlags.objects.filter(version=version).exists()
 
     def test_execute_action_reject_version_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         addon = addon_factory(users=[user_factory()], file_kw={'is_signed': True})
         version = addon.current_version
         self.make_addon_promoted(
-            addon, PROMOTED_GROUP_CHOICES.RECOMMENDED, approve_version=True
+            addon, api_name='high_profile', high_profile=True, approve_version=True
         )
         version.needshumanreview_set.create(
             reason=NeedsHumanReview.REASONS.ABUSE_ADDON_VIOLATION
@@ -3580,8 +3609,8 @@ class TestContentDecision(TestCase):
 
         decision.execute_action(release_hold=True)
         self._test_execute_action_reject_version_outcome(decision)
-        assert 'An attachment was provided.' in mail.outbox[0].body
-        assert 'To respond or view the file,' in mail.outbox[0].body
+        assert 'A reviewer has attached a file' in mail.outbox[0].body
+        assert 'reply by visiting' in mail.outbox[0].body
 
     def test_execute_action_reject_version(self):
         addon = addon_factory(users=[user_factory()])
@@ -3613,14 +3642,14 @@ class TestContentDecision(TestCase):
         self._test_execute_action_reject_version_outcome(decision)
         assert '14 day(s)' not in mail.outbox[0].body
         assert not version.needshumanreview_set.filter(is_active=True).exists()
-        assert 'An attachment was provided.' not in mail.outbox[0].body
-        assert 'To respond or view the file,' not in mail.outbox[0].body
+        assert 'A reviewer has attached a file' not in mail.outbox[0].body
+        assert 'reply by visiting' not in mail.outbox[0].body
 
     def _execute_action_approve_appeal(self, addon, appealed_decision_action):
         older_version = addon.versions.last()
         newer_version = addon.versions.first()
         appeal_job = CinderJob.objects.create()
-        ContentDecision.objects.create(
+        old_decision = ContentDecision.objects.create(
             addon=addon,
             action=appealed_decision_action,
             reasoning='initial review text',
@@ -3633,7 +3662,7 @@ class TestContentDecision(TestCase):
             reviewer_user=self.reviewer_user,
             cinder_job=appeal_job,
         )
-        decision.target_versions.set([older_version, newer_version])
+        old_decision.target_versions.set([older_version, newer_version])
         assert decision.action_date is None
 
         decision.execute_action()
@@ -3644,13 +3673,13 @@ class TestContentDecision(TestCase):
         decision.send_notifications()
         mail_item = mail.outbox[0]
         assert 'some review text' in mail_item.body
-        assert 'An attachment was provided.' not in mail_item.body
-        assert 'To respond or view the file,' not in mail_item.body
+        assert 'A reviewer has attached a file' not in mail_item.body
+        assert 'reply by visiting' not in mail_item.body
         assert (
-            'versions were reinstated: '
+            'versions have been reinstated: '
             f'{older_version.version}, {newer_version.version}' in mail_item.body
         )
-        assert 'versions may be removed again in the future' in mail_item.body
+        assert 'these versions could be reviewed again in the future' in mail_item.body
 
     def test_execute_action_approve_appeal_on_disable(self):
         addon = addon_factory(users=[user_factory()], status=amo.STATUS_DISABLED)
@@ -3668,7 +3697,6 @@ class TestContentDecision(TestCase):
                 'status_disabled_reason': File.STATUS_DISABLED_REASONS.ADDON_DISABLE,
             },
         )
-        #
         self._execute_action_approve_appeal(addon, DECISION_ACTIONS.AMO_DISABLE_ADDON)
         assert addon.reload().status == amo.STATUS_APPROVED
 
@@ -3684,6 +3712,125 @@ class TestContentDecision(TestCase):
         version_factory(addon=addon, file_kw={'status': amo.STATUS_DISABLED})
         self._execute_action_approve_appeal(
             addon, DECISION_ACTIONS.AMO_REJECT_VERSION_ADDON
+        )
+
+    def test_execute_action_approve_override_on_disable(self):
+        # Overriding a disable with an approval re-enables the add-on and, since
+        # the new (approve) action restored a previously disabled add-on, the
+        # owner is notified.
+        addon = addon_factory(users=[user_factory()], status=amo.STATUS_DISABLED)
+        addon.versions.get().file.update(
+            status=amo.STATUS_DISABLED,
+            original_status=amo.STATUS_APPROVED,
+            status_disabled_reason=File.STATUS_DISABLED_REASONS.ADDON_DISABLE,
+        )
+        overridden = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_DISABLE_ADDON,
+            action_date=datetime.now(),
+        )
+        decision = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_APPROVE,
+            reasoning='some review text',
+            reviewer_user=self.reviewer_user,
+            override_of=overridden,
+        )
+        decision.execute_action()
+        assert addon.reload().status == amo.STATUS_APPROVED
+
+        decision.send_notifications()
+        assert len(mail.outbox) == 1
+        assert mail.outbox[0].to == [addon.authors.get().email]
+        assert 'We have restored your extension' in mail.outbox[0].body
+
+    def test_execute_action_approve_override_on_reject(self):
+        # Overriding a reject with a version approval unrejects the versions,
+        # and version approval means the owner is notified.
+        addon = addon_factory(users=[user_factory()])
+        older_version = addon.versions.get()
+        version_factory(
+            addon=addon
+        )  # add a middle version that wasn't rejected or changed
+        older_version.file.update(
+            status=amo.STATUS_DISABLED, original_status=amo.STATUS_APPROVED
+        )
+        newer_version = version_factory(
+            addon=addon, file_kw={'status': amo.STATUS_DISABLED}
+        )
+        original_decision = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_REJECT_VERSION_ADDON,
+            reasoning='initial review text',
+            action_date=datetime.now() - timedelta(days=1),
+        )
+        new_decision = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_APPROVE_VERSION,
+            reasoning='some review text',
+            reviewer_user=self.reviewer_user,
+            override_of=original_decision,
+        )
+        original_decision.target_versions.set([older_version, newer_version])
+        assert new_decision.action_date is None
+
+        new_decision.execute_action()
+        self.assertCloseToNow(new_decision.reload().action_date)
+        assert older_version.file.reload().status == amo.STATUS_APPROVED
+        assert newer_version.file.reload().status == amo.STATUS_AWAITING_REVIEW
+
+        new_decision.send_notifications()
+        assert len(mail.outbox) == 1
+        mail_item = mail.outbox[0]
+        assert mail_item.to == [addon.authors.get().email]
+        assert 'some review text' in mail_item.body
+        assert (
+            'Approved versions: '
+            f'{older_version.version}, {newer_version.version}' in mail_item.body
+        )
+
+    def test_execute_action_override_to_same_enforcement(self):
+        addon = addon_factory(users=[user_factory()], status=amo.STATUS_DISABLED)
+        addon.versions.get().file.update(
+            status=amo.STATUS_DISABLED,
+            original_status=amo.STATUS_APPROVED,
+            status_disabled_reason=File.STATUS_DISABLED_REASONS.ADDON_DISABLE,
+        )
+        overridden = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_DISABLE_ADDON,
+            action_date=datetime.now(),
+            metadata={ContentDecision.POLICY_DYNAMIC_VALUES: {}},
+        )
+        overridden.policies.add(
+            CinderPolicy.objects.create(uuid='1234', name='Bad policy')
+        )
+        overridden.target_versions.set(addon.versions.all())
+        decision = ContentDecision.objects.create(
+            addon=addon,
+            action=DECISION_ACTIONS.AMO_DISABLE_ADDON,
+            reasoning='some review text',
+            reviewer_user=self.reviewer_user,
+            override_of=overridden,
+            metadata={ContentDecision.POLICY_DYNAMIC_VALUES: {}},
+        )
+        decision.policies.add(
+            CinderPolicy.objects.create(uuid='12345', name='Other bad policy')
+        )
+
+        decision.execute_action()
+        assert addon.reload().status == amo.STATUS_DISABLED  # no change
+
+        decision.send_notifications()
+        assert len(mail.outbox) == 1
+        assert mail.outbox[0].to == [addon.authors.get().email]
+        assert 'has been disabled on' in mail.outbox[0].body
+        assert 'Other bad policy' in mail.outbox[0].body
+
+        assert decision.activities.get().action == amo.LOG.DECISION_CREATED.id
+
+        assert list(decision.target_versions.all()) == list(
+            overridden.target_versions.all()
         )
 
     def _test_execute_action_reject_version_delayed_outcome(self, decision):
@@ -3732,11 +3879,11 @@ class TestContentDecision(TestCase):
         assert addon.current_version.reviewerflags.pending_rejection == in_fourteen_days
 
     def test_execute_action_reject_version_delayed_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         addon = addon_factory(users=[user_factory()], file_kw={'is_signed': True})
         version = addon.current_version
         self.make_addon_promoted(
-            addon, PROMOTED_GROUP_CHOICES.RECOMMENDED, approve_version=True
+            addon, api_name='high_profile', high_profile=True, approve_version=True
         )
         some_time_ago = self.days_ago(13)
         little_over_fourteen_days = timedelta(days=14, minutes=1)
@@ -3802,12 +3949,12 @@ class TestContentDecision(TestCase):
         )
         decision.send_notifications()
         assert (
-            'previous correspondence indicated that you would be required '
-            f'to correct the violation(s) by {old_pending_rejection}'
+            'earlier message asked you to resolve the issue(s) by '
+            f'{old_pending_rejection}'
         ) in mail.outbox[0].body
         assert (
-            'now require you to correct your add-on violations no later '
-            f'than {new_pending_rejection}'
+            'Your new deadline to bring your add-on into compliance is '
+            f'{new_pending_rejection}'
         ) in mail.outbox[0].body
 
     def test_send_notifications_without_notifying_owners(self):
@@ -3956,7 +4103,7 @@ class TestContentDecision(TestCase):
         assert 'appeal' in mail.outbox[0].body
 
     def test_execute_action_delete_collection_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         collection = collection_factory(author=self.task_user)
         decision = ContentDecision.objects.create(
             collection=collection,
@@ -4001,7 +4148,7 @@ class TestContentDecision(TestCase):
         assert 'appeal' in mail.outbox[0].body
 
     def test_execute_action_delete_rating_held(self):
-        self.grant_permission(user_factory(), ':'.join(ADDONS_HIGH_IMPACT_APPROVE))
+        self.grant_permission(user_factory(), ADDONS_HIGH_IMPACT_APPROVE)
         user = user_factory()
         addon = addon_factory(users=[user])
         rating = Rating.objects.create(
@@ -4018,7 +4165,10 @@ class TestContentDecision(TestCase):
             reviewer_user=self.reviewer_user,
         )
         self.make_addon_promoted(
-            rating.addon, PROMOTED_GROUP_CHOICES.RECOMMENDED, approve_version=True
+            rating.addon,
+            api_name='high_profile_rating',
+            high_profile_rating=True,
+            approve_version=True,
         )
         assert decision.action_date is None
         mail.outbox.clear()
@@ -4087,10 +4237,10 @@ class TestContentDecision(TestCase):
             file=ContentFile('Pseudo File', name='attachment.txt'),
         )
         decision.send_notifications()
-        assert 'An attachment was provided.' not in mail.outbox[0].body
-        assert 'To respond or view the file,' not in mail.outbox[0].body
-        assert 'An attachment was provided.' in mail.outbox[1].body
-        assert 'To respond or view the file,' in mail.outbox[1].body
+        assert 'A reviewer has attached a file' not in mail.outbox[0].body
+        assert 'reply by visiting' not in mail.outbox[0].body
+        assert 'A reviewer has attached a file' in mail.outbox[1].body
+        assert 'reply by visiting' in mail.outbox[1].body
 
     def _check_requeue_decision(self, requeue, job, decision, user):
         assert requeue != decision
@@ -4261,6 +4411,28 @@ class TestContentDecision(TestCase):
             },
         )
         assert decision.has_policy_text_in_comments is False
+
+
+class TestContentDecisionFollowupAction(TestCase):
+    @time_machine.travel(datetime(2025, 6, 6))
+    def test_description_with_eta(self):
+        addon = addon_factory(users=[user_factory()])
+        decision = ContentDecision.objects.create(
+            addon=addon, action=DECISION_ACTIONS.AMO_DISABLE_ADDON
+        )
+        followup = ContentDecisionFollowupAction.objects.create(
+            decision=decision,
+            action=DECISION_ACTIONS.AMO_FU_DELAY_SHORT_SOFT_BLOCK_ADDON,
+        )
+
+        assert followup.description_with_eta == (
+            'Add-on versions will be Restricted, after 7 days, on 2025-06-13'
+        )
+
+        followup.update(action_date=datetime(2025, 6, 1))
+        assert followup.description_with_eta == (
+            'Add-on versions will be Restricted, after 7 days, on 2025-06-08'
+        )
 
 
 @pytest.mark.parametrize(

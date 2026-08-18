@@ -88,9 +88,11 @@ class TestEmailParser(TestCase):
 @override_switch('activity-email-bouncing', active=True)
 class TestEmailBouncing(TestCase):
     BOUNCE_REPLY = (
-        'Hello,\n\nAn email was received, apparently from you. Unfortunately '
-        "we couldn't process it because of:\n%s\n\nPlease visit %s to leave "
-        'a reply instead.\n--\nMozilla Add-ons\n%s\n'
+        'Hello,\n\nThanks for getting in touch. We received an email that looks '
+        'like it came from you, but unfortunately we were not able to process it:'
+        '\n%s\n\nYou can still leave your reply directly on our site. Just visit '
+        '%s and we will make sure it reaches the right place.\n\n\n--\n'
+        'Mozilla Add-ons\n%s\n'
     )
 
     def setUp(self):
@@ -107,7 +109,7 @@ class TestEmailBouncing(TestCase):
         addon = addon_factory()
         version = addon.find_latest_version(channel=amo.CHANNEL_LISTED)
         user = user_factory()
-        self.grant_permission(user, '*:*')
+        self.grant_permission(user, amo.permissions.SUPERPOWERS)
         ActivityLogToken.objects.create(
             user=user, version=version, uuid='5a0b8a83d501412589cc5d562334b46b'
         )
@@ -250,7 +252,7 @@ class TestAddEmailToActivityLog(TestCase):
         assert self.version.reload().due_date == expected_due_date
 
     def test_reviewer_comment(self):
-        self.grant_permission(self.profile, 'Addons:Review')
+        self.grant_permission(self.profile, amo.permissions.ADDONS_REVIEW)
         note = add_email_to_activity_log(self.parser)
         assert note.log == amo.LOG.REVIEWER_REPLY_VERSION
         self.token.refresh_from_db()
@@ -296,7 +298,9 @@ class TestLogAndNotify(TestCase):
         self.developer = user_factory()
         self.developer2 = user_factory()
         self.reviewer = user_factory()
-        self.grant_permission(self.reviewer, 'Addons:Review', 'Addon Reviewers')
+        self.grant_permission(
+            self.reviewer, amo.permissions.ADDONS_REVIEW, name='Addon Reviewers'
+        )
 
         self.addon = addon_factory()
         self.version = self.addon.find_latest_version(channel=amo.CHANNEL_LISTED)
@@ -342,16 +346,16 @@ class TestLogAndNotify(TestCase):
             self.addon.name,
             self.version.version,
         )
-        assert ('visit %s' % url) in body
+        assert url in body
         assert ('receiving this email because %s' % reason_text) in body
         assert 'If we do not hear from you within' not in body
         assert self.reviewer.name not in body
         if is_to_developer and not is_from_developer:
-            assert ('%s wrote:' % ADDON_REVIEWER_NAME) in body
+            assert ('%s shared:' % ADDON_REVIEWER_NAME) in body
         else:
             assert ('%s wrote:' % author.name) in body
         if expect_attachment:
-            assert 'An attachment was provided.' in body
+            assert 'They have also attached a file' in body
 
     @mock.patch('olympia.activity.utils.send_mail')
     def test_developer_reply(self, send_mail_mock):
@@ -455,7 +459,9 @@ class TestLogAndNotify(TestCase):
 
     @mock.patch('olympia.activity.utils.send_mail')
     def test_staff_cc_group_get_mail(self, send_mail_mock):
-        self.grant_permission(self.reviewer, 'None:None', ACTIVITY_MAIL_GROUP)
+        self.grant_permission(
+            self.reviewer, amo.permissions.NONE, name=ACTIVITY_MAIL_GROUP
+        )
         action = amo.LOG.DEVELOPER_REPLY_VERSION
         comments = 'Thïs is á reply'
         log_and_notify(action, comments, self.developer, self.version)
@@ -533,7 +539,11 @@ class TestLogAndNotify(TestCase):
     @mock.patch('olympia.activity.utils.send_mail')
     def test_review_url_unlisted(self, send_mail_mock):
         self.version.update(channel=amo.CHANNEL_UNLISTED)
-        self.grant_permission(self.reviewer, 'Addons:ReviewUnlisted', 'Addon Reviewers')
+        self.grant_permission(
+            self.reviewer,
+            amo.permissions.ADDONS_REVIEW_UNLISTED,
+            name='Addon Reviewers',
+        )
 
         # One from the reviewer.
         self._create(amo.LOG.REVIEWER_PRIVATE_COMMENT, self.reviewer)

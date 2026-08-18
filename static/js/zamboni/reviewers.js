@@ -115,14 +115,18 @@ $(document).ready(function () {
   }
 
   let policySelectionInputs = $('.review-actions-policies-select input[name="cinder_policies"]');
-  policySelectionInputs.change((event) => {
-    let checkbox = event.target;
-    $("#policy-text-" + checkbox.value)[0].hidden = !checkbox.checked;
 
+  function updatePolicyText() {
+    policySelectionInputs.each(function () {
+      $("#policy-text-" + this.value)[0].hidden = !this.checked;
+    });
+  }
+  policySelectionInputs.change(() => {
+    updatePolicyText();
     updatePolicyEnforcementActionsDisplay();
   });
-  policySelectionInputs.trigger("click").trigger("click");
-
+  updatePolicyText();
+  updatePolicyEnforcementActionsDisplay();
 });
 
 function updatePolicyEnforcementActionsDisplay() {
@@ -167,6 +171,16 @@ function updatePolicyEnforcementActionsDisplay() {
   } else {
     $primaryActions.filter(".action-0").removeClass('hidden');
   }
+}
+
+function showVersionsForOverride() {
+  let $selectedOption = $('#id_override_decision').find('option:selected');
+  let versions = ($selectedOption.attr('data-versions') || '').split(' ').filter(Boolean);
+  $('#id_versions option').each(function () {
+    if (versions.includes($(this).val())) {
+      $(this).show().prop('disabled', false);
+    }
+  });
 }
 
 function initReviewActions() {
@@ -222,13 +236,14 @@ function initReviewActions() {
 
     showHideDelayedRejectionDateWidget();
     updatePolicyEnforcementActionsDisplay();
+    showVersionsForOverride();
   }
 
   function showHideDelayedRejectionDateWidget() {
     var delayed_rejection_input = $(
       '#id_delayed_rejection input[name=delayed_rejection]:checked',
     );
-    console.log(delayed_rejection_input);
+    // console.log(delayed_rejection_input);
     var delayed_rejection_date_widget = $('#id_delayed_rejection_date');
     if (delayed_rejection_input.prop('value') == 'True') {
       delayed_rejection_date_widget.prop('disabled', false);
@@ -247,10 +262,17 @@ function initReviewActions() {
     },
   );
 
+
   let review_checked = $('#review-actions [name=action]:checked');
   if (review_checked.length > 0) {
     showForm(review_checked.parentsUntil('#id_action', 'div'), true);
   }
+
+  $('#id_override_decision').change(function () {
+    let $this_tab = $('#review-actions [name=action]:checked').parentsUntil('#id_action', 'div');
+    showForm($this_tab);
+  });
+
 
   /* Review action reason stuff */
   $('.review-actions-reasons-select input').change(function () {

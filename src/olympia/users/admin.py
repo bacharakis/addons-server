@@ -39,6 +39,7 @@ from olympia.zadmin.admin import related_content_link, related_single_content_li
 
 from . import forms
 from .models import (
+    AsnUserRestriction,
     BannedUserContent,
     DeniedName,
     DisposableEmailDomainRestriction,
@@ -690,7 +691,7 @@ class DeniedNameAdmin(AMOModelAdmin):
                         duplicates += 1
                         continue
                     try:
-                        self.model.objects.create(**{'name': line})
+                        self.model.objects.create(name=line)
                         inserted += 1
                     except IntegrityError:
                         # although unlikely, someone else could have added
@@ -763,6 +764,14 @@ class FingerprintRestrictionAdmin(AMOModelAdmin):
     formfield_overrides = {
         models.CharField: {'widget': TextInput(attrs={'size': '125'})},
     }
+
+
+@admin.register(AsnUserRestriction)
+class AsnUserRestrictionAdmin(AMOModelAdmin):
+    actions = ['delete_selected']
+    list_display = ('asn', 'restriction_type', 'reason')
+    list_filter = ('restriction_type',)
+    search_fields = ('^asn',)
 
 
 @admin.register(UserRestrictionHistory)

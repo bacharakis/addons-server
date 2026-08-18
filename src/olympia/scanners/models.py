@@ -22,7 +22,8 @@ from olympia.abuse.utils import (
 )
 from olympia.access.models import Group, GroupUser
 from olympia.amo.models import ModelBase
-from olympia.constants.base import ADDON_EXTENSION
+from olympia.constants.abuse import POLICY_EXPOSURE
+from olympia.constants.base import ADDON_EXTENSION, COSE_DATE_CUTOFF
 from olympia.constants.scanners import (
     ABORTED,
     ABORTING,
@@ -128,9 +129,14 @@ class AbstractScannerResult(ModelBase):
             return res
         if self.scanner == YARA:
             for item in self.results:
-                res[item['rule']].append(
-                    {'filename': item.get('meta', {}).get('filename', '???')}
-                )
+                ruleId = item.get('rule')
+                data = item.get('meta', {}).copy()
+                filename = data.pop('filename', '???')
+                # Put the other metadata at the top of the list of files for
+                # that rule, without a filename since it's "global".
+                if ruleId not in res:
+                    res[ruleId].append({'filename': '', 'data': data})
+                res[ruleId].append({'filename': filename})
         elif self.scanner == NARC:
             for item in self.results:
                 res[item['rule']].append(item.get('meta', {}))
@@ -321,7 +327,9 @@ class ScannerRule(AbstractScannerRule):
         help_text=(
             'Policy used to automatically derive an action from when the rule hit.'
         ),
-        limit_choices_to={'expose_in_reviewer_tools': True},
+        limit_choices_to={
+            'expose_in_reviewer_tools__in': POLICY_EXPOSURE.FOR_EXTENSIONS.values
+        },
     )
     is_active = models.BooleanField(
         default=True,
@@ -452,8 +460,15 @@ class ScannerResult(AbstractScannerResult):
 
     @classmethod
     def run_actions(cls, version):
+        if version.channel == amo.CHANNEL_ENTERPRISE:
+            log.info(
+                'Not running actions on version %s as it is an enterprise version',
+                version.pk,
+            )
+            return False
         cls.execute_workflow_action(version)
         cls.execute_policy_enforcement_action(version)
+        return True
 
     @classmethod
     def execute_policy_enforcement_action(cls, version):
@@ -641,6 +656,9 @@ class ScannerQueryRule(AbstractScannerRule):
         blank=True,
         help_text='Run this rule on versions in the specific channel only.',
         choices=[(None, '')] + list(amo.CHANNEL_CHOICES.items()),
+    )
+    created_after = models.DateField(
+        db_default=None, default=COSE_DATE_CUTOFF, null=True, blank=True
     )
     celery_group_result_id = models.UUIDField(default=None, null=True)
     task_count = models.PositiveIntegerField(default=0)

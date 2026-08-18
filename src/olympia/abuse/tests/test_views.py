@@ -1411,7 +1411,7 @@ class TestCinderWebhook(TestCase):
         process_mock.assert_called()
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == [author.email]
-        assert 'will not reinstate your Extension' in mail.outbox[0].body
+        assert 'unable to reinstate your extension' in mail.outbox[0].body
 
     def test_create_and_execute_decision_triggers_emails_when_disable_reverted(self):
         data = self.get_data(filename='target_appeal_change_to_approve.json')
@@ -1437,7 +1437,7 @@ class TestCinderWebhook(TestCase):
         process_mock.assert_called()
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == [author.email]
-        assert 'we have restored your Extension' in mail.outbox[0].body
+        assert 'We have restored your extension' in mail.outbox[0].body
 
     def test_create_and_execute_decision_triggers_emails_for_reporter_appeal_disable(
         self,
@@ -1473,7 +1473,7 @@ class TestCinderWebhook(TestCase):
         assert mail.outbox[0].to == ['reporter@email.com']
         assert 'was incorrect' in mail.outbox[0].body
         assert mail.outbox[1].to == [author.email]
-        assert 'has been permanently disabled' in mail.outbox[1].body
+        assert 'has been disabled on' in mail.outbox[1].body
 
     def test_create_and_execute_decision_triggers_no_target_email_for_reporter_approve(
         self,
@@ -1507,7 +1507,7 @@ class TestCinderWebhook(TestCase):
         process_mock.assert_called()
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == ['reporter@email.com']
-        assert 'we have denied your appeal' in mail.outbox[0].body
+        assert 'will not be taking action' in mail.outbox[0].body
 
     def test_queue_does_not_matter_non_reviewer_case(self):
         data = self.get_data()
@@ -3333,7 +3333,7 @@ class TestAppeal(TestCase):
         )
         self.abuse_report.update(guid=None, user=target)
         with time_machine.travel(datetime.now(), tick=False) as frozen_time:
-            for _x in range(0, 20):
+            for _x in range(20):
                 self._add_fake_throttling_action(
                     view_class=AbuseAppealEmailForm,
                     view_kwargs={'expected_email': 'doesntmatter@example.com'},
@@ -3388,7 +3388,7 @@ class TestAppeal(TestCase):
         )
         self.abuse_report.update(guid=None, user=target)
         with time_machine.travel(datetime.now(), tick=False):
-            for _x in range(0, 20):
+            for _x in range(20):
                 self._add_fake_throttling_action(
                     view_class=AbuseAppealEmailForm,
                     view_kwargs={'expected_email': 'doesntmatter@example.com'},
@@ -3419,7 +3419,7 @@ class TestAppeal(TestCase):
         self.addon.authors.add(user)
         self.client.force_login(user)
         with time_machine.travel(datetime.now(), tick=False) as frozen_time:
-            for _x in range(0, 20):
+            for _x in range(20):
                 self._add_fake_throttling_action(
                     view_class=AbuseAppealForm,
                     url=self.author_appeal_url,

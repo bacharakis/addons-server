@@ -41,7 +41,6 @@ from olympia.amo.tests import (
 from olympia.amo.tests.test_helpers import get_image_path
 from olympia.api.models import SYMMETRIC_JWT_TYPE, APIKey, APIKeyConfirmation
 from olympia.applications.models import AppVersion
-from olympia.constants.promoted import PROMOTED_GROUP_CHOICES
 from olympia.devhub.decorators import dev_required
 from olympia.devhub.forms import APIKeyForm, SupportForm
 from olympia.devhub.models import BlogPost, SurveyResponse
@@ -104,7 +103,7 @@ class TestDashboard(HubTest):
         assert doc('title').text() == (
             'Manage My Submissions :: Developer Hub :: Add-ons for Firefox'
         )
-        assert doc('.Footer-links').length == 4
+        assert doc('.Footer-links').length == 6
         assert doc('.Footer-copyright').length == 1
 
     def get_action_links(self, addon_id):
@@ -336,18 +335,21 @@ class TestDevRequired(TestCase):
 
     def test_dev_promoted_status(self):
         self.make_addon_promoted(
-            addon=self.addon, group_id=PROMOTED_GROUP_CHOICES.RECOMMENDED
+            addon=self.addon,
+            api_name='badged',
+            name='Recommended',
+            badged=True,
         )
-        self.make_addon_promoted(addon=self.addon, group_id=PROMOTED_GROUP_CHOICES.LINE)
         self.make_addon_promoted(
-            addon=self.addon, group_id=PROMOTED_GROUP_CHOICES.SPOTLIGHT
+            addon=self.addon, api_name='line', name='By Firefox', badged=True
+        )
+        self.make_addon_promoted(
+            addon=self.addon, api_name='spotlight', name='Spotlight', badged=False
         )
         self.addon.approve_for_version()
-        assert (
-            PROMOTED_GROUP_CHOICES.RECOMMENDED in self.addon.promoted_groups().group_id
-        )
-        assert PROMOTED_GROUP_CHOICES.LINE in self.addon.promoted_groups().group_id
-        assert PROMOTED_GROUP_CHOICES.SPOTLIGHT in self.addon.promoted_groups().group_id
+        assert 'badged' in self.addon.promoted_groups().api_name
+        assert 'line' in self.addon.promoted_groups().api_name
+        assert 'spotlight' in self.addon.promoted_groups().api_name
 
         response = self.client.get(self.get_url)
         assert response.status_code == 200
@@ -570,7 +572,11 @@ class TestHome(TestCase):
 
     def test_my_addons_recommended(self):
         self.make_addon_promoted(
-            self.addon, PROMOTED_GROUP_CHOICES.RECOMMENDED, approve_version=True
+            addon=self.addon,
+            api_name='badged',
+            name='Recommended',
+            badged=True,
+            approve_version=True,
         )
         latest_version = self.addon.find_latest_version(amo.CHANNEL_LISTED)
         latest_file = latest_version.file
@@ -1350,7 +1356,7 @@ class TestAPIKeyPage(TestCase):
             user=self.user, token='old token', confirmed_once=False
         )
         with time_machine.travel(datetime.now(), tick=False):
-            for _x in range(0, 4):
+            for _x in range(4):
                 self._add_fake_throttling_action(
                     view_class=APIKeyForm,
                     url=self.url,
@@ -1827,7 +1833,7 @@ class TestUploadDetail(UploadMixin, TestCase):
     @mock.patch('olympia.devhub.tasks.run_addons_linter')
     def test_experiment_xpi_allowed(self, run_addons_linter_mock):
         user = UserProfile.objects.get(email='regular@mozilla.com')
-        self.grant_permission(user, 'Experiments:submit')
+        self.grant_permission(user, amo.permissions.EXPERIMENTS_SUBMIT)
         run_addons_linter_mock.return_value = self.validation_ok()
         self.upload_file(
             '../../../files/fixtures/files/experiment_inside_webextension.xpi'
@@ -1861,7 +1867,7 @@ class TestUploadDetail(UploadMixin, TestCase):
 
     @mock.patch('olympia.devhub.tasks.run_addons_linter')
     def test_restricted_guid_addon_allowed(self, run_addons_linter_mock):
-        self.grant_permission(self.user, 'SystemAddon:Submit')
+        self.grant_permission(self.user, amo.permissions.SYSTEM_ADDON_SUBMIT)
         run_addons_linter_mock.return_value = self.validation_ok()
         self.upload_file(self.file_fixture_path('mozilla_guid.xpi'))
         upload = FileUpload.objects.get()
@@ -1894,7 +1900,7 @@ class TestUploadDetail(UploadMixin, TestCase):
     @mock.patch('olympia.devhub.tasks.run_addons_linter')
     @mock.patch('olympia.files.utils.get_signer_organizational_unit_name')
     def test_mozilla_signed_allowed(self, get_signer_mock, run_addons_linter_mock):
-        self.grant_permission(self.user, 'SystemAddon:Submit')
+        self.grant_permission(self.user, amo.permissions.SYSTEM_ADDON_SUBMIT)
         run_addons_linter_mock.return_value = self.validation_ok()
         get_signer_mock.return_value = 'Mozilla Extensions'
         self.upload_file(self.file_fixture_path('webextension_signed_already.xpi'))
@@ -2507,7 +2513,7 @@ class TestVerifyEmail(TestCase):
         response = self.client.get(url)
 
         assert len(mail.outbox) == 1
-        assert 'Your email was successfully verified.' in mail.outbox[0].body
+        assert 'Your email address has been verified' in mail.outbox[0].body
         self.assert3xx(response, reverse('devhub.email_verification'))
 
     @mock.patch('olympia.devhub.views.check_suppressed_email_confirmation')
@@ -2527,7 +2533,7 @@ class TestVerifyEmail(TestCase):
             response = self.client.get(url)
 
             assert len(mail.outbox) == 1
-            assert 'Your email was successfully verified.' in mail.outbox[0].body
+            assert 'Your email address has been verified' in mail.outbox[0].body
             self.assert3xx(response, reverse('devhub.email_verification'))
 
     def test_get_email_verified(self):
@@ -2921,7 +2927,7 @@ class TestSupportView(TestCase):
     def test_post_throttled_user(self):
         self.client.force_login(self.user)
         with time_machine.travel(datetime.now(), tick=False):
-            for _x in range(0, 10):
+            for _x in range(10):
                 self._add_fake_throttling_action(
                     view_class=SupportForm,
                     url=self.url,
@@ -2938,7 +2944,7 @@ class TestSupportView(TestCase):
 
     def test_post_throttled_ip(self):
         with time_machine.travel(datetime.now(), tick=False):
-            for _x in range(0, 20):
+            for _x in range(20):
                 self._add_fake_throttling_action(
                     view_class=SupportForm,
                     url=self.url,

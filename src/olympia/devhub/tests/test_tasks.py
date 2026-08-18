@@ -406,21 +406,6 @@ class TestRunAddonsLinter(UploadMixin, ValidatorTestCase):
 
         assert '--disable-xpi-autoclose' not in self.FakePopen.get_args()
 
-    @override_switch('enable-mv3-submissions', active=False)
-    def test_mv3_submissions_waffle_disabled(self):
-        with mock.patch('olympia.devhub.tasks.subprocess') as subprocess_mock:
-            subprocess_mock.Popen = self.FakePopen
-
-            tasks.run_addons_linter(path=self.valid_path, channel=amo.CHANNEL_LISTED)
-
-            assert '--max-manifest-version=3' not in self.FakePopen.get_args()
-            assert '--max-manifest-version=2' in self.FakePopen.get_args()
-
-        mv3_path = get_addon_file('webextension_mv3.xpi')
-        result = tasks.run_addons_linter(mv3_path, channel=amo.CHANNEL_LISTED)
-        assert result.get('errors') == 1
-
-    @override_switch('enable-mv3-submissions', active=True)
     def test_mv3_submission_enabled(self):
         with mock.patch('olympia.devhub.tasks.subprocess') as subprocess_mock:
             subprocess_mock.Popen = self.FakePopen
@@ -472,6 +457,14 @@ class TestRunAddonsLinter(UploadMixin, ValidatorTestCase):
         tasks.run_addons_linter(path=self.valid_path, channel=amo.CHANNEL_LISTED)
 
         assert '--enable-data-collection-permissions=true' in self.FakePopen.get_args()
+
+    @mock.patch('olympia.devhub.tasks.subprocess')
+    def test_enterprise_linting_flag(self, subprocess_mock):
+        subprocess_mock.Popen = self.FakePopen
+
+        tasks.run_addons_linter(path=self.valid_path, channel=amo.CHANNEL_ENTERPRISE)
+
+        assert '--enterprise' in self.FakePopen.get_args()
 
 
 class TestValidateFilePath(ValidatorTestCase):
@@ -767,7 +760,7 @@ class TestAPIKeyInSubmission(UploadMixin, TestCase):
 
         assert len(mail.outbox) == 1
         assert 'Your AMO API credentials have been revoked' in mail.outbox[0].subject
-        assert 'never share your credentials' in mail.outbox[0].body
+        assert 'keep your credentials secure' in mail.outbox[0].body
         assert mail.outbox[0].to[0] == self.user.email
 
     def test_coauthor_api_key_in_submission_is_found(self):
@@ -797,7 +790,7 @@ class TestAPIKeyInSubmission(UploadMixin, TestCase):
 
         assert len(mail.outbox) == 1
         assert 'Your AMO API credentials have been revoked' in mail.outbox[0].subject
-        assert 'never share your credentials' in mail.outbox[0].body
+        assert 'keep your credentials secure' in mail.outbox[0].body
         # We submit as the coauthor, the leaked key is the one from 'self.user'
         assert mail.outbox[0].to[0] == self.user.email
 

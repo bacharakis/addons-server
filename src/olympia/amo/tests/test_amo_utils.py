@@ -10,7 +10,6 @@ import pytest
 from olympia.amo.tests import TestCase, get_temp_filename
 from olympia.amo.utils import (
     SafeStorage,
-    escape_all,
     find_language,
     from_string,
     no_jinja_autoescape,
@@ -69,11 +68,10 @@ def test_resize_image_from_svg():
     tmp_file_name = get_temp_filename()
     try:
         resize_image(src, tmp_file_name, (720, 92), format='jpg', quality=35)
-        with open(tmp_file_name, 'rb') as dfh:
-            with open(expected, 'rb') as efh:
-                dd = dfh.read()
-                ee = efh.read()
-                assert len(dd) == len(ee) and dd == ee
+        with open(tmp_file_name, 'rb') as dfh, open(expected, 'rb') as efh:
+            dd = dfh.read()
+            ee = efh.read()
+            assert len(dd) == len(ee) and dd == ee
     finally:
         if os.path.exists(tmp_file_name):
             os.remove(tmp_file_name)
@@ -88,9 +86,8 @@ def test_resize_transparency():
     expected = src.replace('.png', '-expected.png')
     try:
         resize_image(src, dest, (32, 32))
-        with open(dest, 'rb') as dfh:
-            with open(expected, 'rb') as efh:
-                assert dfh.read() == efh.read()
+        with open(dest, 'rb') as dfh, open(expected, 'rb') as efh:
+            assert dfh.read() == efh.read()
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -109,9 +106,8 @@ def test_resize_transparency_for_P_mode_bug_1181221():
     expected = src.replace('.png', '-expected.png')
     try:
         resize_image(src, dest, (32, 32))
-        with open(dest, 'rb') as dfh:
-            with open(expected, 'rb') as efh:
-                assert dfh.read() == efh.read()
+        with open(dest, 'rb') as dfh, open(expected, 'rb') as efh:
+            assert dfh.read() == efh.read()
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -126,9 +122,8 @@ def test_resize_transparency_to_jpeg_has_white_background():
     expected = src.replace('.png', '-expected.jpg')
     try:
         resize_image(src, dest, (32, 32), format='jpg')
-        with open(dest, 'rb') as dfh:
-            with open(expected, 'rb') as efh:
-                assert dfh.read() == efh.read()
+        with open(dest, 'rb') as dfh, open(expected, 'rb') as efh:
+            assert dfh.read() == efh.read()
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -143,9 +138,8 @@ def test_resize_small_png_rgb():
     expected = src.replace('.png', '-expected.jpg')
     try:
         resize_image(src, dest, (533, 400), format='jpg')
-        with open(dest, 'rb') as dfh:
-            with open(expected, 'rb') as efh:
-                assert dfh.read() == efh.read()
+        with open(dest, 'rb') as dfh, open(expected, 'rb') as efh:
+            assert dfh.read() == efh.read()
     finally:
         if os.path.exists(dest):
             os.remove(dest)
@@ -261,41 +255,6 @@ class TestSafeStorage(TestCase):
         self.stor.delete(fn)
         assert not os.path.exists(fn)
         assert os.path.exists(dp)
-
-
-@pytest.mark.parametrize(
-    'test_input,expected',
-    [
-        (
-            '<script>alert("BALL SO HARD")</script>',
-            '&lt;script&gt;alert(&#34;BALL SO HARD&#34;)&lt;/script&gt;',
-        ),
-        ('Foo"', 'Foo&#34;'),
-        ('Bän...g (bang)', 'Bän...g (bang)'),
-        (u, u),
-        ('-'.join([u, u]), '-'.join([u, u])),
-        (' - '.join([u, u]), ' - '.join([u, u])),
-        ('x荿', 'x\u837f'),
-        ('ϧ΃蒬蓣', '\u03e7\u0383\u84ac\u84e3'),
-        ('¿x', '¿x'),
-    ],
-)
-def test_escape_all(test_input, expected):
-    assert escape_all(test_input) == expected
-
-
-@mock.patch('olympia.amo.templatetags.jinja_helpers.urlresolvers.get_outgoing_url')
-@mock.patch('bleach.callbacks.nofollow', lambda attrs, new: attrs)
-def test_escape_all_linkify_only_full(mock_get_outgoing_url):
-    mock_get_outgoing_url.return_value = 'https://outgoing.firefox.com'
-
-    assert escape_all('http://firefox.com') == (
-        '<a href="https://outgoing.firefox.com">http://firefox.com</a>'
-    )
-
-    assert escape_all('firefox.com') == (
-        '<a href="https://outgoing.firefox.com">firefox.com</a>'
-    )
 
 
 def test_no_jinja_autoescape():

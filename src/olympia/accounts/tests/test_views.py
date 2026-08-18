@@ -632,7 +632,7 @@ class TestWithUser(TestCase):
 
     def test_special_user_should_redirect_for_two_factor_auth(self):
         # User isn't a developer but is part of a group.
-        self.grant_permission(self.user, 'Some:Thing')
+        self.grant_permission(self.user, amo.permissions.NONE)
         self._test_should_redirect_for_two_factor_auth()
 
     def test_theme_developer_should_not_redirect_for_two_factor_auth(self):
@@ -1203,7 +1203,7 @@ class TestAuthenticateView(TestCase, InitializeSessionMixin):
 
     def test_log_in_redirects_to_home_when_request_is_secure_but_next_path_is_not(
         self,
-    ):  # noqa
+    ):
         email = 'real@yeahoo.com'
         UserProfile.objects.create(email=email)
         self.fxa_identify.return_value = (
@@ -1284,7 +1284,7 @@ class TestAccountViewSet(TestCase):
 
         # Even as admin deleted users are not visible through the API.
         user = user_factory()
-        self.grant_permission(user, 'Users:Edit')
+        self.grant_permission(user, amo.permissions.USERS_EDIT)
         self.client.login_api(user)
         response = self.client.get(self.url)
         assert response.status_code == 404
@@ -1336,7 +1336,7 @@ class TestAccountViewSet(TestCase):
         assert response.data['url'] == absolutify(self.user.get_url_path())
 
     def test_admin_view(self):
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
         self.random_user = user_factory(biography='something!')
         random_user_profile_url = reverse_ns(
@@ -1366,7 +1366,7 @@ class TestAccountViewSet(TestCase):
 
     def test_admin_view_slug(self):
         # Check it works the same with an account slug rather than pk.
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
         self.random_user = user_factory()
         random_user_profile_url = reverse_ns(
@@ -1379,7 +1379,7 @@ class TestAccountViewSet(TestCase):
         assert response.data['url'] == absolutify(self.random_user.get_url_path())
 
     def test_lookup_view(self):
-        self.grant_permission(self.user, 'Users:Lookup')
+        self.grant_permission(self.user, amo.permissions.USERS_LOOKUP)
         self.client.login_api(self.user)
         random_user = user_factory(biography='something!')
         random_user_profile_url = reverse_ns(
@@ -1413,7 +1413,7 @@ class TestAccountLookup(APIKeyAuthTestMixin, TestCase):
     def setUp(self):
         self.target_user = user_factory(email='developer@example.com')
         self.create_api_user()
-        self.grant_permission(self.user, 'Users:Lookup')
+        self.grant_permission(self.user, amo.permissions.USERS_LOOKUP)
         self.url = reverse_ns('account-lookup')
         super().setUp()
 
@@ -1465,6 +1465,34 @@ class TestAccountLookup(APIKeyAuthTestMixin, TestCase):
         assert response.status_code == 403
 
 
+class TestAccountRetrieveWithJWT(APIKeyAuthTestMixin, TestCase):
+    """Retrieving an account via API key (JWT), gated by Users:Lookup."""
+
+    def setUp(self):
+        self.target_user = user_factory(
+            biography='something!', email='developer@example.com'
+        )
+        self.url = reverse_ns('account-detail', kwargs={'pk': self.target_user.pk})
+        self.create_api_user()
+        super().setUp()
+
+    def test_retrieve_with_lookup_permission_returns_email(self):
+        self.grant_permission(self.user, amo.permissions.USERS_LOOKUP)
+        response = self.get(self.url)
+        assert response.status_code == 200
+        assert response.data['name'] == self.target_user.name
+        assert response.data['biography'] == self.target_user.biography
+        assert response.data['email'] == self.target_user.email
+        assert 'last_login_ip' not in response.data
+        assert 'permissions' not in response.data
+
+    def test_retrieve_without_lookup_permission_hides_email(self):
+        response = self.get(self.url)
+        assert response.status_code == 200
+        assert response.data['name'] == self.target_user.name
+        assert 'email' not in response.data
+
+
 class TestAccountViewSetUpdate(TestCase):
     client_class = APITestClientSessionID
     update_data = {
@@ -1506,7 +1534,7 @@ class TestAccountViewSetUpdate(TestCase):
         assert response.status_code == 403
 
     def test_admin_patch(self):
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
         random_user = user_factory()
         url = reverse_ns('account-detail', kwargs={'pk': random_user.pk})
@@ -1811,7 +1839,7 @@ class TestAccountViewSetDelete(TestCase):
         assert response.status_code == 403
 
     def test_admin_delete(self):
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
 
         random_user = user_factory()
@@ -2233,7 +2261,7 @@ class TestAccountNotificationViewSetList(TestCase):
 
     def test_admin_view(self):
         self.user = user_factory()  # different user now
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
         response = self.client.get(self.url)
         assert response.status_code == 200
@@ -2327,7 +2355,7 @@ class TestAccountNotificationViewSetUpdate(TestCase):
     def test_admin_update(self):
         original_user = self.user
         self.user = user_factory()  # different user now
-        self.grant_permission(self.user, 'Users:Edit')
+        self.grant_permission(self.user, amo.permissions.USERS_EDIT)
         self.client.login_api(self.user)
 
         response = self.client.post(self.url, data={'reply': False})
